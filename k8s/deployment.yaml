@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alethic-ism-transformer-composite-deployment
+  namespace: alethic
+spec:
+  replicas: 1 
+  selector:
+    matchLabels:
+      app: alethic-ism-transformer-composite
+  template:
+    metadata:
+      labels:
+        app: alethic-ism-transformer-composite
+    spec:
+      volumes:
+        - name: alethic-ism-routes-secret-volume
+          secret:
+            secretName: alethic-ism-routes-secret
+            items:
+              - key: .routing.yaml
+                path: .routing.yaml
+      containers:
+      - name: alethic-ism-transformer-composite
+        image: <IMAGE>
+        imagePullPolicy: Always
+        volumeMounts:
+          - name: alethic-ism-routes-secret-volume
+            mountPath: /app/repo/.routing.yaml
+            subPath: .routing.yaml
+            readOnly: true
+        env:
+          - name: ROUTING_FILE
+            valueFrom:
+              secretKeyRef:
+                name: alethic-ism-transformer-composite-secret
+                key: ROUTING_FILE
+          - name: DSN
+            valueFrom:
+              secretKeyRef:
+                name: alethic-ism-transformer-composite-secret
+                key: DSN
+        ports:
+        - containerPort: 8080
+      imagePullSecrets:
+      - name: regcred
