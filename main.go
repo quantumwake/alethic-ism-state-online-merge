@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"github.com/nats-io/nats.go"
 	"github.com/quantumwake/alethic-ism-core-go/pkg/data"
 	"github.com/quantumwake/alethic-ism-core-go/pkg/routing"
@@ -16,8 +17,10 @@ import (
 
 var (
 	messageStore         *store.MessageStore
-	natsRoute            *routing.NATSRoute
-	natsRouteStateRouter *routing.NATSRoute
+	natsRoute            *routing.NATSRoute // the route we are listening on
+	natsRouteStateRouter *routing.NATSRoute // route for routing state messages
+	natsRouteMonitor     *routing.NATSRoute // route for sending errors
+	natsRouteSync        *routing.NATSRoute // route for sending sync messages
 	dataAccess           *data.Access
 )
 
@@ -37,55 +40,52 @@ func handleQueryState(routeMsg data.RouteMessage, queryState map[string]interfac
 	}
 	key := compositeKey.(string)
 
-	// store the message in the message store and get the message back
-	// this should store the new message along with the previous message, if it exists
-	// if both messages have been set then we can now merge and the messages together
+	// store the message in the message store and get the message back.
+	// the first message is SourceData1 and the second will become SourceData2
 	message, err := messageStore.StoreMessage(key, &queryState)
 	if err != nil {
-		log.Printf("error storing message: %v", err)
-		// TODO submit error to to monitor route
-		return
+		handleError(routeMsg, context.Background(), err)
 	}
 
+	// both messages have been set then we can now merge and the messages together
 	if message.SourceData1 != nil && message.SourceData2 != nil {
+
+		//sendMonitorMessage(routeMsg.RouteID, data.Running, context.Background())
+
 		// remove the message regardless of the outcome, TODO error handling and reporting needs to be improved
 		defer messageStore.RemoveMessage(key)
 
 		// merge the two messages together
-		mergedSources, err := utils.ListDifferenceMerge(
-			*message.SourceData1,
-			*message.SourceData2)
-
+		mergedSources, err := utils.ListDifferenceMerge(*message.SourceData1, *message.SourceData2)
 		if err != nil {
-			log.Printf("error merging sources: %v", err)
-			// TODO error handling
-			return
+			handleError(routeMsg, context.Background(), err)
 		}
 
-		// determine the processor id
+		// determine the processor id such that we can get the output state ids for the processor
 		routeOn, err := dataAccess.FindRouteByID(routeMsg.RouteID)
 		if err != nil {
-			log.Printf("error finding route by id: %v", routeMsg.RouteID)
-			// TODO submit error to monitor route
-			return
+			handleError(routeMsg, context.Background(), fmt.Errorf("error, no route found for route id %v, err: %v", routeMsg.RouteID, err))
 		}
 
-		outputStates, err := dataAccess.FindRouteByProcessorAndDirection(routeOn.ProcessorID, data.DirectionOutput)
+		// get the output states for the processor, for each output state we need to send the merged sources to its connected processor
+		outputStateRoutes, err := dataAccess.FindRouteByProcessorAndDirection(routeOn.ProcessorID, data.DirectionOutput)
 		if err != nil {
-			log.Printf("error, no output states found for current processor: %v", err)
-			// TODO submit error to monitor route
+			handleError(routeMsg, context.Background(), fmt.Errorf("error, no output states found for current processor: %v", err))
 			return
 		}
 
 		// TODO PERFORMANCE/CAPACITY/LOAD: we can probably batch these and have a send channel where we can batch the messages together
-		for _, outputState := range outputStates {
-			// for each output state we need to send the merged sources to the connected processor as defined by state id and direction input
-			outputRoutes, err := dataAccess.FindRouteByStateAndDirection(outputState.StateID, data.DirectionInput)
+		for _, outputStateRoute := range outputStateRoutes {
+
+			// each output state route will contain a state id, this state id is used to find which routes we need to send the merged sources to
+			outputRoutes, err := dataAccess.FindRouteByStateAndDirection(outputStateRoute.StateID, data.DirectionInput)
 			if err != nil {
-				log.Printf("error finding output routes: %v", err)
-				// TODO submit error to monitor route
+				handleError(routeMsg, context.Background(), fmt.Errorf("error finding output routes for state id: %v, err: %v", outputStateRoute.StateID, err))
 				continue
 			}
+
+			// we update the route between this processor and the output state id
+			sendMonitorMessage(outputStateRoute.ID, data.Completed, context.Background())
 
 			// now we iterate each of the state routes and send the merged sources to the connected processor
 			for _, outputRoute := range outputRoutes {
@@ -97,20 +97,22 @@ func handleQueryState(routeMsg data.RouteMessage, queryState map[string]interfac
 				// TODO context.TODO() is a placeholder, we need to determine the context for the message
 				err := natsRouteStateRouter.Publish(context.TODO(), hopRouteMsg)
 				if err != nil {
-					log.Printf("error publishing message: %v", err)
-					// TODO submit error to monitor route
+					handleError(hopRouteMsg, context.Background(), fmt.Errorf("error publishing message: %v", err))
 					continue
 				}
+
+				//sendMonitorMessage(hopRouteMsg.RouteID, data.Completed, context.Background())
 			}
 		}
+
 	}
 }
 
-func onMessageReceived(route *routing.NATSRoute, msg *nats.Msg) {
+func onMessageReceived(ctx context.Context, route *routing.NATSRoute, msg *nats.Msg) {
 	defer func(msg *nats.Msg, opts ...nats.AckOpt) {
 		err := msg.Ack()
 		if err != nil {
-
+			log.Printf("error acking message: %v, error: %v", msg.Data, err)
 		}
 	}(msg)
 
@@ -119,14 +121,13 @@ func onMessageReceived(route *routing.NATSRoute, msg *nats.Msg) {
 	var routeMsg data.RouteMessage
 	err := json.Unmarshal(msg.Data, &routeMsg)
 	if err != nil {
-		// TODO send to monitor error
-		log.Printf("Error unmarshalling json object: %v", err)
+		handleError(routeMsg, ctx, err)
 		return
 	}
+	sendMonitorMessage(routeMsg.RouteID, data.Running, ctx)
 
 	if routeMsg.QueryState == nil {
-		// TODO send to monitor error
-		log.Printf("Error: query state not found in message")
+		handleError(routeMsg, ctx, fmt.Errorf("error: query state not found in message"))
 		return
 	}
 
@@ -135,9 +136,56 @@ func onMessageReceived(route *routing.NATSRoute, msg *nats.Msg) {
 		handleQueryState(routeMsg, qse)
 	}
 
+	sendMonitorMessage(routeMsg.RouteID, data.Completed, ctx)
+}
+
+func sendMonitorMessage(routeID string, status data.ProcessorStatusCode, ctx context.Context) {
+	monitorMessage := data.MonitorMessage{
+		Type:    data.MonitorProcessorState,
+		RouteID: routeID,
+		Status:  status,
+	}
+
+	log.Printf("Sending monitor route: %v, status: %v\n", routeID, status)
+
+	err := natsRouteMonitor.Publish(ctx, monitorMessage)
+	if err != nil {
+		// TODO need to log this error with proper error handling and logging
+		log.Print("critical error: unable to publish error to monitor route")
+	}
+
+	err = natsRouteMonitor.Flush()
+	if err != nil {
+		// TODO need to log this error with proper error handling and logging
+		log.Print("critical error: unable to publish error to monitor route")
+	}
+	//time.Sleep(1 * time.Second) // Sleep for 2 seconds to allow the message to be sent
+}
+
+func handleError(routeMsg data.RouteMessage, ctx context.Context, err error) {
+	handleErrorWithParams(routeMsg.RouteID, routeMsg.QueryState, ctx, err)
+}
+
+func handleErrorWithParams(routeID string, dataValue interface{}, ctx context.Context, err error) {
+	err = fmt.Errorf("error unmarshalling json object: %v", err)
+	monitorMessage := data.MonitorMessage{
+		Type:      data.MonitorProcessorState,
+		RouteID:   routeID,
+		Status:    data.Failed,
+		Exception: err.Error(),
+		Data:      dataValue,
+	}
+
+	err = natsRouteMonitor.Publish(ctx, monitorMessage)
+	if err != nil {
+		// TODO need to log this error with proper error handling and logging
+		log.Print("Critical error: unable to publish error to monitor route")
+	}
 }
 
 func main() {
+	ctx, _ := context.WithCancel(context.Background())
+
 	// check routing file environment variable and set default if not found
 	routingFile, ok := os.LookupEnv("ROUTING_FILE")
 	if !ok {
@@ -161,7 +209,20 @@ func main() {
 	if err != nil {
 		log.Fatalf("error finding state router route: %v", err)
 	}
-	natsRouteStateRouter = routing.NewNATSRoute(stateRouter, onMessageReceived)
+	natsRouteStateRouter = routing.NewNATSRoute(stateRouter)
+
+	// find monitor route, used for sending errors
+	monitorRoute, err := routes.FindRouteBySelector("processor/monitor")
+	if err != nil {
+		log.Fatalf("error finding monitor route: %v", err)
+	}
+
+	// connect to monitor route
+	natsRouteMonitor = routing.NewNATSRoute(monitorRoute)
+	err = natsRouteMonitor.Connect(ctx)
+	if err != nil {
+		log.Fatalf("error connecting to monitor route: %v", err)
+	}
 
 	// connect to usage database
 	dsn, ok := os.LookupEnv("DSN")
@@ -172,7 +233,6 @@ func main() {
 
 	// Register a new Message Store and start the reconcile process in a new go routine
 	messageStore = store.NewMessageStore()
-	ctx, _ := context.WithCancel(context.Background())
 	go messageStore.StartReconcile(ctx)
 	//defer cancel()
 
@@ -181,7 +241,7 @@ func main() {
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
 	// create a new route and subscribe to inbound messages
-	natsRoute = routing.NewNATSRoute(route, onMessageReceived)
+	natsRoute = routing.NewNATSRouteWithCallback(route, onMessageReceived)
 	err = natsRoute.Subscribe(ctx)
 	if err != nil {
 		log.Fatalf("unable to subscribe to NATS: %v, route: %v", route, err)

@@ -1,5 +1,12 @@
 # Start from the latest golang base image
-FROM golang:latest
+FROM golang:1.22
+
+# Set up environment variables
+ARG GIT_USERNAME
+ARG GIT_TOKEN
+
+# Create a .netrc file to store Git credentials
+RUN echo -e "machine github.com\nlogin $GIT_USERNAME\npassword $GIT_TOKEN" > ~/.netrc
 
 # Set the Current Working Directory inside the container
 WORKDIR /app

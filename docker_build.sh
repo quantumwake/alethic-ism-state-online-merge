@@ -11,6 +11,7 @@ print_usage() {
 TAG=""
 ARCH="linux/amd64"
 
+
 # Parse command line arguments
 while getopts 't:a:' flag; do
   case "${flag}" in
@@ -27,11 +28,23 @@ if [ -z "$ARCH" ]; then
   # TODO: Check operating system and set ARCH accordingly, e.g., ARCH="linux/arm64"
 fi
 
+# Check if GIT_USERNAME and GIT_TOKEN environment variables are set
+if [ -z "$GIT_USERNAME" ] || [ -z "$GIT_TOKEN" ]; then
+  echo "Error: GIT_USERNAME and GIT_TOKEN environment variables must be set."
+  exit 1
+fi
+
 ## Display arguments
 echo "Platform: $ARCH"
 echo "Platform Docker Image Tag: $TAG"
+echo "Git Username: $GIT_USERNAME"
+echo "Git Token: $GIT_TOKEN"
+
+docker build  myapp .
 
 # Build the Docker image which creates the package
 docker build --progress=plain \
   --platform "$ARCH" -t "$TAG" \
+  --build-arg GIT_USERNAME=$GIT_USERNAME \
+  --build-arg GIT_TOKEN=$GIT_TOKEN \
   --no-cache .
