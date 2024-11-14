@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/nats-io/nats.go"
 	"github.com/quantumwake/alethic-ism-core-go/pkg/data"
+	"github.com/quantumwake/alethic-ism-core-go/pkg/model"
 	"github.com/quantumwake/alethic-ism-core-go/pkg/routing"
 	"github.com/quantumwake/alethic-ism-transformer-composite/pkg/store"
 	"github.com/quantumwake/alethic-ism-transformer-composite/pkg/utils"
@@ -20,7 +21,7 @@ var (
 	natsRoute            *routing.NATSRoute // the route we are listening on
 	natsRouteStateRouter *routing.NATSRoute // route for routing state messages
 	natsRouteMonitor     *routing.NATSRoute // route for sending errors
-	natsRouteSync        *routing.NATSRoute // route for sending sync messages
+	natsRouteStateSync   *routing.NATSRoute // route for sending sync messages
 	dataAccess           *data.Access
 )
 
@@ -68,7 +69,7 @@ func handleQueryState(routeMsg data.RouteMessage, queryState map[string]interfac
 		}
 
 		// get the output states for the processor, for each output state we need to send the merged sources to its connected processor
-		outputStateRoutes, err := dataAccess.FindRouteByProcessorAndDirection(routeOn.ProcessorID, data.DirectionOutput)
+		outputStateRoutes, err := dataAccess.FindRouteByProcessorAndDirection(routeOn.ProcessorID, model.DirectionOutput)
 		if err != nil {
 			handleError(routeMsg, context.Background(), fmt.Errorf("error, no output states found for current processor: %v", err))
 			return
@@ -78,7 +79,7 @@ func handleQueryState(routeMsg data.RouteMessage, queryState map[string]interfac
 		for _, outputStateRoute := range outputStateRoutes {
 
 			// each output state route will contain a state id, this state id is used to find which routes we need to send the merged sources to
-			outputRoutes, err := dataAccess.FindRouteByStateAndDirection(outputStateRoute.StateID, data.DirectionInput)
+			outputRoutes, err := dataAccess.FindRouteByStateAndDirection(outputStateRoute.StateID, model.DirectionInput)
 			if err != nil {
 				handleError(routeMsg, context.Background(), fmt.Errorf("error finding output routes for state id: %v, err: %v", outputStateRoute.StateID, err))
 				continue
@@ -100,9 +101,12 @@ func handleQueryState(routeMsg data.RouteMessage, queryState map[string]interfac
 					handleError(hopRouteMsg, context.Background(), fmt.Errorf("error publishing message: %v", err))
 					continue
 				}
-
-				//sendMonitorMessage(hopRouteMsg.RouteID, data.Completed, context.Background())
 			}
+
+			// send the merged sources to the state router
+			sendStateSyncMessage(outputStateRoute.ID, []map[string]interface{}{
+				mergedSources,
+			}, context.Background())
 		}
 
 	}
@@ -159,7 +163,28 @@ func sendMonitorMessage(routeID string, status data.ProcessorStatusCode, ctx con
 		// TODO need to log this error with proper error handling and logging
 		log.Print("critical error: unable to publish error to monitor route")
 	}
-	//time.Sleep(1 * time.Second) // Sleep for 2 seconds to allow the message to be sent
+}
+
+func sendStateSyncMessage(routeID string, queryState []map[string]interface{}, ctx context.Context) {
+	syncMessage := data.RouteMessage{
+		Type:       data.QueryStateRoute,
+		RouteID:    routeID,
+		QueryState: queryState,
+	}
+
+	log.Printf("Sending state to state sync route: %v\n", routeID)
+
+	err := natsRouteStateSync.Publish(ctx, syncMessage)
+	if err != nil {
+		// TODO need to log this error with proper error handling and logging
+		log.Print("critical error: unable to publish error to state sync route")
+	}
+
+	err = natsRouteStateSync.Flush()
+	if err != nil {
+		// TODO need to log this error with proper error handling and logging
+		log.Print("critical error: unable to publish error to state sync route")
+	}
 }
 
 func handleError(routeMsg data.RouteMessage, ctx context.Context, err error) {
@@ -222,6 +247,14 @@ func main() {
 	err = natsRouteMonitor.Connect(ctx)
 	if err != nil {
 		log.Fatalf("error connecting to monitor route: %v", err)
+	}
+
+	// connect to monitor route
+	stateSyncRoute, err := routes.FindRouteBySelector("processor/state/sync")
+	natsRouteStateSync = routing.NewNATSRoute(stateSyncRoute)
+	err = natsRouteStateSync.Connect(ctx)
+	if err != nil {
+		log.Fatalf("error connecting to state sync route: %v", err)
 	}
 
 	// connect to usage database

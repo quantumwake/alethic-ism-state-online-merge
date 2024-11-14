@@ -4,7 +4,7 @@ go 1.22
 
 require (
 	github.com/nats-io/nats.go v1.37.0
-	github.com/quantumwake/alethic-ism-core-go v0.0.0-20240902153851-837de9437d8b
+	github.com/quantumwake/alethic-ism-core-go v0.0.0-20241113221210-277b0de7c7f2
 )
 
 require (
