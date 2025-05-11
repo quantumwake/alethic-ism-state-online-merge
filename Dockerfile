@@ -1,5 +1,5 @@
 # Start from the latest golang base image
-FROM golang:1.22
+FROM golang:1.24
 
 # Set up environment variables
 ARG GIT_USERNAME
