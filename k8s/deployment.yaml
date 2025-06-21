@@ -1,17 +1,17 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: alethic-ism-transformer-composite-deployment
+  name: alethic-ism-state-online-merge-deployment
   namespace: alethic
 spec:
   replicas: 1 
   selector:
     matchLabels:
-      app: alethic-ism-transformer-composite
+      app: alethic-ism-state-online-merge
   template:
     metadata:
       labels:
-        app: alethic-ism-transformer-composite
+        app: alethic-ism-state-online-merge
     spec:
       volumes:
         - name: alethic-ism-routes-secret-volume
@@ -21,7 +21,7 @@ spec:
               - key: .routing.yaml
                 path: .routing.yaml
       containers:
-      - name: alethic-ism-transformer-composite
+      - name: alethic-ism-state-online-merge
         image: <IMAGE>
         imagePullPolicy: Always
         volumeMounts:
@@ -33,12 +33,12 @@ spec:
           - name: ROUTING_FILE
             valueFrom:
               secretKeyRef:
-                name: alethic-ism-transformer-composite-secret
+                name: alethic-ism-state-online-merge-secret
                 key: ROUTING_FILE
           - name: DSN
             valueFrom:
               secretKeyRef:
-                name: alethic-ism-transformer-composite-secret
+                name: alethic-ism-state-online-merge-secret
                 key: DSN
         ports:
         - containerPort: 8080
