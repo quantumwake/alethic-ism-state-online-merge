@@ -224,7 +224,7 @@ func main() {
 	}
 
 	// find the usage route we want to listen on
-	route, err := routes.FindRouteBySelector("data/transformers/mixer/state-composite-1.0")
+	route, err := routes.FindRouteBySelector("data/transformers/mixer/state-online-merge-1.0")
 	if err != nil {
 		log.Fatalf("error finding coalescer route: %v", err)
 	}
